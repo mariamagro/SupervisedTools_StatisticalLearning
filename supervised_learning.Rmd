@@ -1,0 +1,936 @@
+---
+title: "Supervised Learning"
+author: "María Ángeles Magro Garrote"
+date: '2022'
+output:
+  html_document: 
+    theme: cerulean
+    highlight: tango
+    number_sections: no
+    toc: no
+    toc_depth: 1
+  pdf_document:
+    theme: cerulean
+    highlight: tango
+    number_sections: yes
+    toc: yes
+    toc_depth: 1
+editor_options:
+  chunk_output_type: console
+---
+```{r global_options, include=T, echo = F}
+knitr::opts_chunk$set(echo = T, warning=FALSE, message=FALSE)
+```
+
+# Introduction
+
+In this project, a data set has been chosen in prder to apply supervised tools to predict our target variable: the Rent of houses. This, will be our study variable both for classification and regression, using it as a factor first, and then as numeric. Furthermore, the relations between the target variable and the rest of variables (predictors) will be explained.
+
+
+Before continuing, each variable of the dataset will be explained:
+
+* BHK: Number of Bedrooms, Hall, Kitchen.
+
+* Rent: Rent of the Houses/Apartments/Flats.
+
+* Size: Size of the Houses/Apartments/Flats in Square Feet.
+
+* Floor: Houses/Apartments/Flats situated in which Floor and Total Number of Floors (Example: Ground out of 2, 3 out of 5, etc.)
+
+* Area Type: Size of the Houses/Apartments/Flats calculated on either Super Area or Carpet Area or Build Area.
+
+* Area Locality: Locality of the Houses/Apartments/Flats.
+
+* City: City where the Houses/Apartments/Flats are Located.
+
+* Furnishing Status: Furnishing Status of the Houses/Apartments/Flats, either it is Furnished or Semi-Furnished or Unfurnished.
+
+* Tenant Preferred: Type of Tenant Preferred by the Owner or Agent.
+
+* Bathroom: Number of Bathrooms.
+
+* Point of Contact: Whom should you contact for more information regarding the Houses/Apartments/Flats.
+
+____________________________________________________________________________
+
+Before starting the study, the local enviroment will be cleaned and the necessary libraries will be loaded.
+
+```{r}
+# cleaning environment
+rm(list=ls())
+
+# loading libraries
+library(VIM)
+library(tidyverse)
+library(MASS)
+library(caret)
+library(e1071)
+library(GGally)
+library(glmnet)
+library(pROC)
+library(randomForest)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(naivebayes)
+library(leaflet)
+```
+
+# Data preprocessing 
+
+The dataset will be loaded.
+```{r}
+# uploading the csv which contains the data
+data = read.csv("House_Rent_Dataset.csv", header = TRUE, sep = ",")
+# moving Rent to the first place (target variable)
+data = data[,c(3,1,2,4,5,6,7,8,9,10,11,12)]
+# getting insights about our data set
+head(data)
+```
+
+# Cleaning 
+
+Are there any missing values? The following graph will display that information.
+```{r}
+# For missing values, aggr function is used.
+aggr(data, numbers = TRUE, sortVars = TRUE, labels = names(data), ylab= c('Missing data','Pattern'), col = c("purple", "red", "orange"))
+```
+
+There is no missing values. Then, it will be checked if there is any duplicated data. In case there is, it will be deleted as there is enough data. 
+```{r}
+if(sum(duplicated(data))!= 0) {
+  data = data[!duplicated(data), ]
+}
+```
+
+For finishing the data cleaning, the outliers of our study variable will be checked.
+```{r}
+QI <- quantile(data$Rent, 0.25)
+QS <- quantile(data$Rent, 0.75)
+IQR = QS-QI
+
+sum(data$Rent < QI - 1.5*IQR | data$Rent > QS + 1.5*IQR)
+
+ggplot(data) +
+  aes(x = "", y = Rent) +
+  geom_boxplot(fill = "#0c4c8a") +
+  theme_minimal()
+```
+
+We have 520 outliers. As our data set is big, they will be erased. 
+```{r}
+# saving outliers with $out
+outliers <- boxplot(data$Rent, plot=FALSE)$out
+# eliminating them from the dataset
+data <- data[-which(data$Rent %in% outliers),]
+```
+
+# Feature engineering
+
+There are some variables which have many different levels, which will only produce noise in our study, so they will be erased. In this case, they are Floor and Area.Locality variables.
+
+```{r}
+# erasing floor and area locality
+data = data[,-c(5, 7)]
+```
+
+Furthermore, all the data is from 2022. So from the variable Posted.on it is only interesting saving the month. For that, it will be used the function substr in order to save from the position 6 to the 7 of each row.
+```{r}
+for(i in 1:nrow(data)) {
+  data[i,2] <- substr(data[i,2], 6, 7)
+}
+# casting it as numeric
+data$Posted.On = as.numeric(data$Posted.On)
+# saving this before editing
+data.num = data
+```
+
+# Visualization
+
+The correlation coefficients with the study variable (Rent) can be shown so an insight is obtained from the relations our variables share. Only our numeric variables are used:
+
+```{r}
+R = cor(data[, c(1,3,4,9)]);R
+
+corr_delay <- sort(cor(data[, c(1,3,4,9)])["Rent",], decreasing = T)
+corr=data.frame(corr_delay)
+ggplot(corr,aes(x = row.names(corr), y = corr_delay)) + 
+  geom_bar(stat = "identity", fill = "lightblue") + 
+  scale_x_discrete(limits= row.names(corr)) +
+  labs(x = "", y = "Rent", title = "Correlations") + 
+  theme(plot.title = element_text(hjust = 0, size = rel(1.5)),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Posted.On does not have correlation with other variables, which makes sense because it corresponds to the month of the year. Furthermore, Size and BHK and Bathroom have a high linear correlation (the bigger the house, the more rooms and bathrooms).
+
+When it comes to be correlated with Rent, Bathroom is the most correlated one. Posted.on the less correlated variable.
+
+With this, some ideas have been gotten.
+
+* Rent and Size / Area.Type
+
+Let's compare Rent values with the Size of the houses. They will be colored by the type the house is located in.
+
+```{r}
+ggplot(data) +
+  aes(x = Rent, y = Size, colour = Area.Type) +
+  geom_point(shape = "circle", size = 1.5) +
+  scale_color_hue(direction = 1) +
+  theme_minimal()
+```
+
+Notice all Super Area houses are located at lower values of Rent, while Carpet Area at higher values of Rent. Furthermore, almost no value of Built Area is obtained.
+
+```{r}
+ggplot(data) +
+  aes(x = Area.Type) +
+  geom_bar(fill = "#112446") +
+  theme_minimal()
+
+
+data %>% count(Area.Type, sort = TRUE)
+```
+
+No enough information for learning from Built Area. 
+
+```{r}
+mean(data$Rent[which(data$Area.Type=="Super Area")])
+mean(data$Rent[which(data$Area.Type=="Carpet Area")])
+
+mean(data$Rent[which(data$Area.Type=="Built Area")])
+```
+
+As stated before, the mean of carpet area houses is higher than the one of super area houses. The mean of houses in built area is far lower than the other levels.
+
+* City
+
+Is city a well balanced variable? 
+
+```{r}
+ggplot(data) +
+  aes(x = City) +
+  geom_bar(fill = "#112446") +
+  theme_minimal()
+```
+
+As seen, there is values for every city. Is there any city expensive?
+
+```{r}
+ggplot(data) +
+  aes(x = Size, y = Rent, colour = City) +
+  geom_point(shape = "circle", size = 1.5) +
+  scale_color_hue(direction = 1) +
+  theme_minimal()
+```
+
+The first most noticeable thing is that houses from Mumbai are grouped all at low values of size but the highest of rent. 
+
+Furthermore, Hyderabad houses follow the expected distribution: the higher the size, the higher the price.
+
+A separate analysis can be done:
+```{r}
+ggplot(data) +
+  aes(x = Rent, y = Size) +
+  geom_point(shape = "circle", size = 1.5, colour = "#112446") +
+  theme_minimal() +
+  facet_wrap(vars(City))
+```
+
+As observed, Mumbai achieves our before statement. The rest of countries follow an expected distribution.
+
+* Bathroom, BHK, Size
+
+```{r}
+ggplot(data) +
+  aes(x = Rent, y = Size, colour = BHK) +
+  geom_point(shape = "circle", size = 1.5) +
+  scale_color_gradient() +
+  theme_minimal()
+```
+
+Smaller number of BHK are concentrated in lower values of rent and size, while higher number of BHK goes higher in the graph.
+
+Does the same happen with Bathroom? 
+```{r}
+ggplot(data) +
+  aes(x = Rent, y = Size, colour = Bathroom) +
+  geom_point(shape = "circle", size = 1.5) +
+  scale_color_gradient() +
+  theme_minimal()
+```
+
+Again, a similar graph is obtained. So are BHK and Bathroom correlated? Previously it has been showed that yes which Would make sense because the bigger the house is, the more bathroom it may have and also bedroom, kitchens, etc...
+
+```{r}
+ggplot(data) +
+  aes(x = BHK, y = Bathroom, color = Size) +
+  geom_jitter(size = 1.5) +
+  theme_minimal()
+```
+
+Which shows the correlation among both variables.
+
+* Furnishing.Status
+```{r}
+ggplot(data) +
+  aes(x = Rent, y = Size) +
+  geom_point(shape = "circle", size = 1.5, colour = "#112446") +
+  theme_minimal() +
+  facet_wrap(vars(Furnishing.Status))
+```
+The state of the furnishes does seem to affect not the price neither the rent. 
+```{r}
+mean(data$Rent[which(data$Furnishing.Status=="Unfurnished")])
+mean(data$Rent[which(data$Furnishing.Status=="Semi-Furnished")])
+
+mean(data$Rent[which(data$Furnishing.Status=="Furnished")])
+```
+We see that the the price of the furniture increase a little by increasing the status. So it may affect, although the relationship with rent is not as stronger.
+
+
+* CONCLUSION
+
+It has been seen that Rent may be related with the Size mainly but also with the BHK and Bathroom, which are related to Size. Furniture is also a factor to take into account although not as strongly as city, as almost all of them are correlated with a correlated Size and Rent.
+
+# Classification 
+
+Before starting different methods, our study variable (Rent) must be classified depending on the price the house has. 
+
+We will divide it into "very cheap", "cheap", "expensive" and "very expensive" according to the information provided by the quartiles of the summary function.
+
+```{r}
+table(data$Rent)
+summary(data$Rent)
+data$Rent = factor(ifelse(data$Rent  <= 9500 , "Very_cheap", 
+                   ifelse(data$Rent <= 15000, "Cheap", 
+                   ifelse(data$Rent <= 19286, "Expensive",
+                    "Very_expensive"))))
+```
+
+Our data set is now divided like: 
+
+```{r}
+ggplot(data) +
+  aes(x = Rent) +
+  geom_bar(fill = "#112446") +
+  theme_minimal()
+```
+
+There is data in all the levels. Also, the distribution is balanced: all type of houses are found in all the cities availables in out dataset.
+```{r}
+table(data$Rent, data$City)
+```
+
+Now, the train and test set will be created. The variable that is going to be predicted (dependent) is Rent.
+```{r}
+spl = createDataPartition(data$Rent, p = 0.8, list = FALSE)  # 80% for training
+
+dataTrain = data[spl,]
+dataTest = data[-spl,]
+```
+
+
+# LDA
+
+The first method applied of classification will be Linear Discriminant Analysis. In order to build the model, the train data set will be used.
+```{r}
+# LDA model
+lda.model <- lda(Rent ~ ., data=dataTrain)
+lda.model
+```
+
+It has been obtained the prior probabilities (percentages of data belonging to that type in the training set), the group means (means of each group belonging to that category) and the coefficients of linear discriminants (the combinations used to form the LDA). As there is 4 groups, there are 3 linear classifiers.
+
+Our LDA model can be shown also using ggplot:
+```{r}
+lda.data <- cbind(dataTrain, predict(lda.model)$x)
+ggplot(lda.data, aes(LD1, LD2)) +
+  geom_point(aes(color = Rent))
+```
+
+With this information, it can be predicted an output with our test set. It can be computed the probabilities and the prediction using "posterior" and "class."
+```{r}
+# predictions
+probability = predict(lda.model, newdata=dataTest)$posterior
+head(probability)
+
+prediction = predict(lda.model, newdata=dataTest)$class
+head(prediction)
+```
+
+With this information, predictions can be made according to some data provided in order to determine the most possible output of Rent as seen in probability with the Test set.
+
+Probability will give us the percentages of belonging to all the classifications of each row of the data set. 
+
+In prediction, each observation received is the most possible classification, receiving only one per row of the data set in our case.
+
+Finally, the accuracy of our model can be computed with the actual values of the Rent. It will be used the prediction computed before and will be compared with the test set. Notice that both must have the same lengths and levels.
+
+```{r}
+# computing accuracy 
+confusionMatrix(prediction, dataTest$Rent)
+confusionMatrix(prediction, dataTest$Rent)$overall[1]
+```
+
+The accuracy obtained is of 67% which is good although could be improved which will be later done through the Benchmark model.
+
+# QDA
+
+Quadratic Discriminant Analysis will be now performed. In order not to get an error of rank deficiency, some variables must be eliminated because they are some how correlated and will only provide us redundancy.
+
+```{r}
+# Area.type and Point.of.contact are subtracted (provide us rank deficiency)
+data_aux=data[,-c(5,10)]
+dataTrain_aux = data_aux[spl,]
+dataTest_aux = data_aux[-spl,]
+
+# QDA model
+qda.model <- qda(Rent ~ ., data=dataTrain_aux)
+qda.model
+```
+
+Again, with the model created, the Test set will be used to classify the Rent according to the data that it gives. Then, the accuracy will be computed with the real values of the rent of that data set.
+
+```{r}
+prediction = predict(qda.model, newdata=dataTest_aux)$class
+prediction
+```
+
+Again, the predictions of each row are obtained. Now, they will be compared with the dataTest_aux$Rent in order to compute the confusion matrix.
+
+```{r}
+confusionMatrix(prediction, dataTest_aux$Rent)$table
+confusionMatrix(prediction, dataTest_aux$Rent)$overall[1]
+```
+
+An accuracy of 61% is obtained, lower than the one of the LDA model.
+
+
+# Benchmark model
+
+Now, a Benchmark model will be created in order to try to improve the accuracy of the LDA one.
+
+The goal is to reduce the categories of rent (Very expensive, Very cheap, Expensive and Cheap) because of the following:
+
+```{r}
+table(data$Rent)
+obs <- max(table(dataTest$Rent))
+# Accuracy:
+obs/nrow(dataTest)
+```
+
+The accuracy obtained is low: 36%. How can it be improved? Reducing the different categories. "Very_expensive" is the most frequent one so let's save that one and leave the rest as "Cheaper"
+```{r}
+# now, another data will be created in which the Rent will be transformed as mentioned.
+data_aux = data
+data_aux$Rent = factor(ifelse(data_aux$Rent == "Very_expensive", "Very_expensive",
+                           "Cheaper"))
+
+# checking that it has been done correctly.
+levels(data_aux$Rent)
+```
+
+Now, with the new data set, the train and test set are re done with the previously split.
+
+```{r}
+dataTrain_aux = data_aux[spl,]
+dataTest_aux = data_aux[-spl,]
+```
+
+A new LDA model is performed with the new classification of Rent.
+
+```{r}
+lda.model <- lda(Rent ~ ., data=dataTrain_aux)
+```
+
+The predictions will be now performed on the test set. With this, the accuracy of our model can be checked again.
+
+```{r}
+####
+prediction = predict(lda.model, newdata=dataTest_aux)$class
+confusionMatrix(prediction, dataTest_aux$Rent)$table
+
+confusionMatrix(prediction, dataTest_aux$Rent)$overall[1]
+```
+
+The accuracy obtained is of 86%, far better than the one of the first LDA and the one computed initially. So, throughout this method the LDA model performance has been improved.
+
+
+# ROC Curve
+
+Now, the ROC Curve will be created from the previous LDA model. This model will be formed from the train and test set which was divided into: "Expensive" and "Cheaper". 
+
+Now, rather than computing the accuracy, the efficiency will be checked through out the ROC Curve. 
+
+```{r}
+roc.lda <- roc(dataTest_aux$Rent,probability[,2])
+```
+
+The higher the area under the curve is, the better is the model. It is checked:
+```{r}
+auc(roc.lda)
+```
+63% of the area is under the curve, which reaffirms the idea that it is a good model. This is illustrated in the following: 
+
+```{r}
+plot.roc(dataTest_aux$Rent, probability[,2],col="darkblue", print.auc = TRUE,  auc.polygon=TRUE, grid=c(0.1, 0.2),
+         grid.col=c("green", "red"), max.auc.polygon=TRUE,
+         auc.polygon.col="lightblue", print.thres=TRUE)
+```
+
+# Decision tree
+
+Now, let's make a Machine learning algorithm: a decision tree. 
+
+The first step is to choose the values of our hyper-parameters: 
+
+* minsplit: minimum number of observations in a node before before a split
+* maxdepth: maximum depth of any node of the final tree
+* cp: degree of complexity, the smaller the more branches
+
+The choice is made with some typical values. The cp is is set to 0.01 because if a higher value is chosen, the future graph created won't provide us as many information.
+
+```{r}
+# Hyper-parameters choice
+control = rpart.control(minsplit = 30, maxdepth = 10, cp=0.01)
+```
+
+A model is created using Rent as our study variable and then, together with the train set, a plot can be formed explaining how our data is divided in order to classify the Rent category.
+
+```{r}
+dtFit = rpart(Rent ~., data=dataTrain, method = "class", control = control)
+
+# library rattle provide us fancyRpartPlot which shows better plots.
+fancyRpartPlot(dtFit)
+```
+
+Notice that the plot always divides in two branches: moving to the right means a no for the previous condition and to the left a yes. 
+
+Also, it is notice that some important variables are Bathroom, city and BHK in order to study our data set.
+
+Variable importance can be check:
+```{r}
+df <- data.frame(imp = dtFit$variable.importance)
+df
+```
+So, Bathroom, BHK and City are confirmed to be the most important variables in our study. Others, such as Tenant.preferred, does not provide us useful information for predicting Rent. 
+
+Now, let's start with the training of our model. 
+```{r}
+caret.fit <- train(Rent ~., 
+                   data = dataTrain, 
+                   method = "rpart",
+                   control=rpart.control(minsplit = 30, maxdepth = 10),
+                   trControl = trainControl(method = "cv", number = 5),
+                   tuneLength=10)
+caret.fit
+```
+
+The cp chosen to be the optimal one is very cloose to 0: 0.0018... So, it will provide a very specific decision tree: 
+```{r}
+fancyRpartPlot(caret.fit$finalModel)
+```
+
+As it may be difficult to read it, the same information can be displayed by written.
+```{r}
+rpart.rules(dtFit, style = "tallw")
+```
+
+With this model, the predictions can be done to our test set, saving them in dtPred.
+```{r}
+dtProb <- predict(caret.fit, dataTest, type = "prob")
+threshold = 0.2
+# all will be cheap and then they will be changed.
+dtPred = rep("Cheap", nrow(dataTest))
+dtPred[which(dtProb[,2] > threshold)] = "Expensive"
+dtPred[which(dtProb[,3] > threshold)] = "Very_cheap"
+dtPred[which(dtProb[,4] > threshold)] = "Very_expensive"
+```
+
+A confusion matrix is computed comparing our predicion with the actual value of Rent.
+```{r}
+CM = confusionMatrix(factor(dtPred), dataTest$Rent)$table
+CM
+confusionMatrix(factor(dtPred), dataTest$Rent)$overall[1]
+```
+Another way of measuring the success of our model is by the cost it has to the company. Let's assume the following one:
+
+* Cost of true negatives is 0
+
+* Cost of false negatives is 500
+
+* Cost of false positives is 100
+
+* Cost of true positives is 140
+
+```{r}
+cost.unit <- c(0, 100, 500, 140)
+```
+The lower the cost obtained, the better our model will be.
+```{r}
+# doing the mean
+cost = sum(as.vector(CM)*cost.unit)/sum(CM)
+cost
+```
+
+# Random forest
+
+Let's make the random forest technique. The function randomForest will be used and the standard hyper parameters will be chosen.
+```{r}
+rf.train <- randomForest(Rent ~., data=dataTrain,                      ntree=200,mtry=10,importance=TRUE, do.trace=T)
+```
+With our random tree created, a prediction can be done on our dataTest.
+```{r}
+rf.pred <- predict(rf.train, newdata=dataTest)
+#CM done on comparing the predicted value and the real value
+confusionMatrix(rf.pred, dataTest$Rent)
+```
+Now, we can optimize the value of the hyper parameters with the following function. It will be based on a cost.
+```{r}
+EconomicCost <- function(data, lev = NULL, model = NULL) 
+{
+  y.pred = data$pred 
+  y.true = data$obs
+  CM = confusionMatrix(y.pred, y.true)$table
+  out = sum(as.vector(CM)*cost.unit)/sum(CM)
+  names(out) <- c("EconomicCost")
+  out
+}
+
+
+ctrl <- trainControl(method = "cv", number = 5,
+                     classProbs = TRUE, 
+                     summaryFunction = EconomicCost,
+                     verboseIter=T)
+
+EconomicCost(data = data.frame(pred  = rf.pred, obs = dataTest$Rent))
+```
+It will be controlled with the function of control. The function EconomicCost will be now used.
+
+Our cost will be the following one:
+```{r}
+EconomicCost(data = data.frame(pred  = rf.pred, obs = dataTest$Rent))
+```
+Now, let's make a RF with the previous results.
+```{r}
+rf.train <- train(Rent ~., 
+                  method = "rf", 
+                  data = dataTrain,
+                  preProcess = c("center", "scale"),
+                  ntree = 200,
+                  tuneGrid = expand.grid(mtry=c(6,8,10)), 
+                  metric = "EconomicCost",
+                  maximize = F,
+                  trControl = ctrl)
+
+
+```
+
+With this RF the variable importance can be shown:
+```{r}
+rf_imp <- varImp(rf.train, scale = F)
+plot(rf_imp, scales = list(y = list(cex = .95)))
+```
+
+Now the prediction can be done with the tree we have created. Comparing the real result with the predicted one. 
+```{r}
+rfPred = predict(rf.train, newdata=dataTest)
+CM = confusionMatrix(factor(rfPred), dataTest$Rent)$table
+cost = sum(as.vector(CM)*cost.unit)/sum(CM)
+cost
+```
+
+The threshold in the Bayes Rules may be also interesting.
+```{r}
+threshold = 0.2
+rfProb = predict(rf.train, newdata=dataTest, type="prob")
+threshold = 0.2
+dtPred = rep("Cheap", nrow(dataTest))
+# 4 levels!
+dtPred[which(rfProb[,2] > threshold)] = "Expensive"
+dtPred[which(rfProb[,3] > threshold)] = "Very cheap"
+dtPred[which(rfProb[,4] > threshold)] = "Very expensive"
+CM = confusionMatrix(factor(rfPred), dataTest$Rent)$table
+cost = sum(as.vector(CM)*cost.unit)/sum(CM)
+cost
+```
+
+# Multinomial Naive-Bayes classification
+
+Another method is going to be done. Multinomial Naive Bayes model is going to be performed: all class conditional distributions are assumed to be multinomial and independent. 
+
+Only numeric variables will be used, and the study variable will be separated from the other ones.
+```{r}
+
+NB.fit <- multinomial_naive_bayes(as.matrix(dataTrain[,c(2,3,4,9)]), 
+                                  dataTrain$Rent, 
+                                  laplace=.6)
+```
+
+Now, let's make a prediction from our fit and compare it to the real values of the data test.
+```{r}
+NB.pred <- predict(NB.fit, as.matrix(dataTest[,c(2,3,4,9)]))
+
+NB.prob <- predict(NB.fit, as.matrix(dataTest[,c(2,3,4,9)]),type="prob")
+hist(NB.prob)
+
+# CM to test perfomance of the fit
+confusionMatrix(NB.pred,dataTest$Rent)
+```
+60% of balanced accuracy is obtained.
+
+# Tuning
+
+Let's make a tuning model. Then compare the obtained predicted values with the real ones.
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     repeats = 1,
+                     number = 10,
+                     verboseIter = T)
+
+nb_grid <-   expand.grid(usekernel = c(TRUE, FALSE),
+                         laplace = c(0, 0.5, 1), 
+                         adjust = c(0.5, 1, 1.5))
+
+nb_mod <- train(x = dataTrain[,c(-1)],
+                y = dataTrain$Rent,
+                method = "naive_bayes",
+                trControl = ctrl,
+                tuneGrid = nb_grid)
+
+nb_pred <- predict(nb_mod,
+                   newdata = dataTest[,c(-1)])
+
+confusionMatrix(nb_pred, dataTest$Rent)
+```
+A balanced accuracy of 81% is obtained.
+
+```{r}
+plot(nb_mod)
+
+plot(confusionMatrix(nb_pred,dataTest$Rent)[["table"]])
+```
+
+# Conclusions on CLASSIFICATION
+
+The following accuracies has been obtained:
+* LDA: 65%
+* QDA: 61%
+* Benchmark model: 85%
+* ROC Curve (area below curve): 61%
+* Decision tree: 63%
+* Multinomial Naive-Bayes classification: 62%
+* Tuning: 82%
+
+Costs
+* Random forest: 167
+
+Recalling two of the most important graphs obtained:
+* The decision tree has provided us an useful divison when deciding the levels of Rent: Bathroom, City and BHK are some of the most important variables taken into account.
+
+* The Var.Imp.Plot of the Random Forest also reaffirms one of our initial assumptions: size is highly correlated with rent. Others such as the Area Type and Furniture does not aport much to our model.
+
+# Advanced regression
+
+In regression, our study variable must be numeric, so data.num is going to eb used. We must create again a train and a test set. Before that, all our str must be converted into numbers. 
+
+First we convert it to factors in order to know the levels of the variable. Then, we use the function varaible to redenominate each level with a number.
+
+```{r}
+# Area.Type
+data.num$Area.Type = as.factor(data.num$Area.Type)
+levels(data.num$Area.Type)
+data.num$Area.Type = factor(data.num$Area.Type ,levels = c("Built Area","Carpet Area", "Super Area"),labels=c(1,2,3))
+
+#City
+data.num$City = as.factor(data.num$City)
+levels(data.num$City)
+data.num$City = factor(data.num$City, levels = c("Bangalore","Chennai", "Delhi", "Hyderabad", "Kolkata", "Mumbai"),labels=c(1,2,3,4,5,6))
+
+# Furnishing.Status
+data.num$Furnishing.Status = as.factor(data.num$Furnishing.Status)
+levels(data.num$Furnishing.Status)
+data.num$Furnishing.Status = factor(data.num$Furnishing.Status, levels = c("Furnished", "Semi-Furnished", "Unfurnished"),labels=c(1,2,3))
+
+# Tenant.Preferred
+data.num$Tenant.Preferred = as.factor(data.num$Tenant.Preferred)
+levels(data.num$Tenant.Preferred)
+data.num$Tenant.Preferred = factor(data.num$Tenant.Preferred, levels = c("Bachelors", "Bachelors/Family", "Family"),labels=c(1,2,3))
+
+
+# Point.of.Contact
+data.num$Point.of.Contact = as.factor(data.num$Point.of.Contact)
+data.num$Point.of.Contact = factor(data.num$Point.of.Contact, levels = c("Contact Agent", "Contact Builder", "Contact Owner"),labels=c(1,2,3))
+
+
+# Creating of training and test set with the initial split.
+dataTrain.num = data.num[spl,]
+dataTest.num = data.num[-spl,]
+```
+
+# A benchmark
+Let's start with benchmark. It can be predicted all the new home prices as the average price in the training set.
+```{r}
+benchFit <- lm(Rent ~ 1, data=data.num)
+benchFit$coefficients
+
+predictions <- predict(benchFit, newdata=dataTest.num)
+RMSE <- sqrt(mean((predictions - dataTest.num$Rent)^2))
+RMSE
+```
+
+# Statistical learning
+
+After using caret package to create a ctrl, we wil have to create a model in which variables can interact with each other:
+*  The syntax x1:x2 tells R to include an interaction term between x1 and x2. 
+* The syntax x1*x2 simultaneously includes x1, x2, and the interaction term x1:x2 as predictors; it is a shorthand for
+# x1+x2+x1:x2
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5, repeats = 1)
+
+linFit <- lm(Rent ~ log(Size) + Bathroom*BHK + Posted.On + City + Area.Type + Point.of.Contact + Tenant.Preferred + Furnishing.Status, data=dataTrain.num)
+
+summary(linFit)
+```
+Our model has a r squared of 67%! It is a good model.
+```{r}
+Model = Rent ~ log(Size) + Bathroom:BHK + Posted.On + City + Area.Type + Furnishing.Status + Tenant.Preferred
+```
+
+# Linear Regression
+
+We will use the previous model and will train it.
+```{r}
+lm_tune <- train(Model, data = dataTrain.num, 
+                 method = "lm", 
+                 preProc=c('scale', 'center'),
+                 trControl = ctrl)
+lm_tune
+```
+
+Now, we predict with the lr model.
+```{r}
+# creating a matrix where all predictions will be saved so alter comparisons can be done.
+test_results <- data.frame(Rent = dataTest.num$Rent)
+test_results$lm <- predict(lm_tune, dataTest.num)
+postResample(pred = test_results$lm,  obs = dataTest.num$Rent)
+```
+Plotting the real values vs the model predictions!
+```{r}
+qplot(test_results$lm, test_results$Rent) + 
+  labs(title="Linear Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(0, 100000), y = c(0, 100000)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+
+```
+
+# The Lasso
+```{r}
+lasso_grid <- expand.grid(fraction = seq(.01, 1, length = 100))
+
+lasso_tune <- train(Model, data = dataTrain.num,
+                    method='lasso',
+                    preProc=c('scale','center'),
+                    tuneGrid = lasso_grid,
+                    trControl=ctrl)
+plot(lasso_tune)
+lasso_tune$bestTune
+
+test_results$lasso <- predict(lasso_tune, dataTest.num)
+postResample(pred = test_results$lasso,  obs = test_results$Rent)
+```
+
+# kNN
+
+Let’s check the names for hyper-parameters
+```{r}
+modelLookup('kknn')
+```
+
+Training a model for later testing.
+```{r}
+knn_tune <- train(Model, 
+                  data = dataTrain.num,
+                  method = "kknn",   
+                  preProc=c('scale','center'),
+                  tuneGrid = data.frame(kmax=c(11,13,15,19,21),distance=2,kernel='optimal'),
+                  trControl = ctrl)
+# our model param.
+plot(knn_tune)
+
+test_results$knn <- predict(knn_tune, dataTest.num)
+
+# saving in the matrix results.
+postResample(pred = test_results$knn,  obs = test_results$Rent)
+```
+
+# Ensemble
+Let’s summarize the MAE for all the tools from the matrix test_results.
+```{r}
+apply(test_results[-1], 2, function(x) mean(abs(x - test_results$Rent)))
+
+# Combination of them, Normal mean: (n1 + n2 + n3) / 3
+test_results$comb = (test_results$lm + test_results$lasso + test_results$knn)/3
+
+postResample(pred = test_results$comb,  obs = test_results$Rent)
+```
+A high R squared has been obtained, which means that our model is valid throught out all methods.
+
+# Final predictions
+
+```{r}
+yhat = test_results$comb
+
+head(yhat) # show the prediction for 6 home prices
+
+hist(yhat, col="lightblue")
+```
+
+# Prediction intervals
+
+```{r}
+y = test_results$Rent
+error = y-yhat
+hist(error, col="lightblue")
+```
+
+We can split the testing set in two parts: one to measure the size of the noise, and the other one to compute the intervals from that size
+
+```{r}
+noise = error[1:100]
+
+lwr = yhat[101:length(yhat)] + quantile(noise,0.05, na.rm=T)
+upr = yhat[101:length(yhat)] + quantile(noise,0.95, na.rm=T)
+
+predictions = data.frame(real=y[101:length(y)], fit=yhat[101:length(yhat)], lwr=lwr, upr=upr)
+
+predictions = predictions %>% mutate(out=factor(if_else(real<lwr | real>upr,1,0)))
+
+# how many real observations are out of the intervals?
+mean(predictions$out==1)
+
+ggplot(predictions, aes(x=fit, y=real))+
+  geom_point(aes(color=out)) + theme(legend.position="none") +
+  xlim(0, 88300) + ylim(0,  70000)+
+  geom_ribbon(data=predictions,aes(ymin=lwr,ymax=upr),alpha=0.3) +
+  labs(title = "Prediction intervals", x = "prediction",y="real price")
+```
+
+# Conclusions
+
+Through out all this project several methods have been done (classification and regression) in order to try to predict an outcome on Rent depending on the predictors. 
+
+Throughout classification, succesfull models have been obtained with accuracies higher than 60% and providing us useful insights about the relationships.
+
+Also, using advanced regression important models have been created with a high R squared.
+
+What are the final insights? 
+
+Size is the highest correlated variable of our dataset, followed bu BHK and Bathroom, correlated with Size. Other may have provided only noise (shown by the coefficients in the models) such as Point.of COntact and Posted.On.
+Others provided smaller information but are also important.
+
+Rent is not perfectly predicteable and that's why accuracies never give 100%! Despite this, accuracies tell us that the models would work quite well.
